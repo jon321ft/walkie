@@ -1,0 +1,13 @@
+# Render Blueprint — one service serves the built app + WebSocket signaling.
+# Deploy: https://render.com/deploy?repo=https://github.com/jon321ft/walkie
+services:
+  - type: web
+    name: walkie
+    runtime: node
+    plan: free
+    healthCheckPath: /health
+    buildCommand: npm ci && cd apps/web && npm ci && npm run build
+    startCommand: node server/ws.mjs
+    envVars:
+      - key: NODE_VERSION
+        value: 22
