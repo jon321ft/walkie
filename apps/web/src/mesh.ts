@@ -1,5 +1,10 @@
 /**
- * mesh.ts — many-peer walkie-talkie over WebRTC. (v5)
+ * mesh.ts — many-peer walkie-talkie over WebRTC. (v6)
+ *
+ * v6 adds life in the background: a screen wake lock while transmitting,
+ * visibility handling that never leaves a hot mic, mic revival if the OS
+ * ends the track, an instant reconnect when the tab comes back, and a
+ * MediaSession so the OS treats the channel as active audio.
  *
  * Why v5: v4 played remote streams through a WebAudio graph, and Chrome can
  * emit SILENCE from createMediaStreamSource() on remote WebRTC streams
@@ -20,7 +25,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-export const BUILD_VERSION = 5
+export const BUILD_VERSION = 6
 
 export interface PeerInfo {
   id: string
@@ -283,6 +288,7 @@ export function useWalkieMesh(wsUrl: string) {
   targetsRef.current = targets
   const micMeterRef = useRef<{ level: () => number } | null>(null)
   const remoteLevelsRef = useRef<Map<string, number>>(new Map()) // id → audioLevel
+  const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null)
 
   const setPeer = useCallback((id: string, patch: Partial<PeerInfo>) => {
     setPeers((prev) => {
@@ -322,6 +328,74 @@ export function useWalkieMesh(wsUrl: string) {
     }
     setMicOn(true)
     return stream
+  }, [])
+
+  // ---- mobile lifeline: survive backgrounding / a locked screen -------------
+
+  /** If the OS ended our mic track while the tab was frozen, capture a fresh
+   *  one and hand it to every sender that was using the dead track. */
+  const reviveMic = useCallback(async () => {
+    const cur = micStreamRef.current?.getAudioTracks()[0]
+    if (cur && cur.readyState === 'live') return
+    micStreamRef.current = null
+    micMeterRef.current = null
+    try {
+      const stream = await ensureMic()
+      const fresh = stream.getAudioTracks()[0]
+      if (!fresh) return
+      fresh.enabled = speakingRef.current
+      for (const p of peersRef.current.values()) {
+        for (const tx of p.pc.getTransceivers()) {
+          const old = tx.sender.track
+          if (old && old.kind === 'audio' && old.readyState === 'ended') {
+            try {
+              await tx.sender.replaceTrack(fresh)
+            } catch {
+              /* transceiver already gone */
+            }
+          }
+        }
+      }
+    } catch {
+      /* permission revoked or no input device */
+    }
+  }, [ensureMic])
+
+  /** Tell the OS we are live audio so it keeps the channel (and screen-off
+   *  playback) alive instead of freezing us as an idle tab. */
+  const updateMediaSession = useCallback((active: boolean) => {
+    const ms = navigator.mediaSession
+    if (!ms) return
+    try {
+      if (active) {
+        ms.metadata = new MediaMetadata({ title: 'Walkie', artist: 'Push-to-talk', album: 'Live channel' })
+        ms.playbackState = 'playing'
+      } else {
+        ms.playbackState = 'none'
+        ms.metadata = null
+      }
+    } catch {
+      /* partial MediaSession support */
+    }
+  }, [])
+
+  /** Hold the screen awake while the button is held (mobile screens lock fast). */
+  const acquireWakeLock = useCallback(async () => {
+    const nav = navigator as Navigator & {
+      wakeLock?: { request: (type: 'screen') => Promise<{ release: () => Promise<void> }> }
+    }
+    if (!nav.wakeLock || document.visibilityState !== 'visible') return
+    try {
+      wakeLockRef.current = await nav.wakeLock.request('screen')
+    } catch {
+      /* unsupported, denied, or the document lost focus mid-request */
+    }
+  }, [])
+
+  const releaseWakeLock = useCallback(() => {
+    const lock = wakeLockRef.current
+    wakeLockRef.current = null
+    if (lock) void lock.release().catch(() => {})
   }, [])
 
   // ---- peer lifecycle -----------------------------------------------------
@@ -465,6 +539,17 @@ export function useWalkieMesh(wsUrl: string) {
         return
       }
       if (msg.t === 'error') {
+        if (msg.code === 'taken') {
+          // another tab/device claimed this name — stop the reconnect tug-of-war
+          userLeftRef.current = true
+          if (reconnectTimerRef.current !== null) {
+            clearTimeout(reconnectTimerRef.current)
+            reconnectTimerRef.current = null
+          }
+          for (const id of [...peersRef.current.keys()]) destroyPeer(id)
+          setMe(null)
+          setServerState('offline')
+        }
         setError(msg.message)
         setConnecting(false)
         wsRef.current?.close()
@@ -572,6 +657,20 @@ export function useWalkieMesh(wsUrl: string) {
     [handleSignal, wsUrl],
   )
 
+  /** Skip the backoff timer — used when the tab regains focus after the OS
+   *  froze our socket in the background. */
+  const reconnectNow = useCallback(() => {
+    if (userLeftRef.current) return
+    const rs = wsRef.current?.readyState
+    if (rs === WebSocket.OPEN || rs === WebSocket.CONNECTING) return
+    if (reconnectTimerRef.current !== null) {
+      clearTimeout(reconnectTimerRef.current)
+      reconnectTimerRef.current = null
+    }
+    backoffRef.current = 0
+    if (nameRef.current) connectWs(nameRef.current)
+  }, [connectWs])
+
   const join = useCallback(
     async (name: string) => {
       setError(null)
@@ -585,15 +684,17 @@ export function useWalkieMesh(wsUrl: string) {
         setError(e instanceof Error ? `Microphone blocked: ${e.message}` : 'Microphone unavailable')
         return
       }
+      updateMediaSession(true)
       connectWs(name)
     },
-    [connectWs, ensureMic],
+    [connectWs, ensureMic, updateMediaSession],
   )
 
   // ---- PTT ----------------------------------------------------------------
   const startTalking = useCallback(async () => {
     unlockWalkieAudio() // this press is a gesture: unlock playback too
     if (speakingRef.current) return
+    void acquireWakeLock() // keep the screen on while the button is held
     speakingRef.current = true
     setSpeaking(true)
     const t = micStreamRef.current?.getAudioTracks()[0]
@@ -607,10 +708,11 @@ export function useWalkieMesh(wsUrl: string) {
         }
       }
     }
-  }, [])
+  }, [acquireWakeLock])
 
   const stopTalking = useCallback(async () => {
     if (!speakingRef.current) return
+    releaseWakeLock()
     speakingRef.current = false
     setSpeaking(false)
     const t = micStreamRef.current?.getAudioTracks()[0]
@@ -624,7 +726,7 @@ export function useWalkieMesh(wsUrl: string) {
         }
       }
     }
-  }, [])
+  }, [releaseWakeLock])
 
   const setTarget = useCallback((t: TargetMode) => {
     setTargets(t)
@@ -657,13 +759,33 @@ export function useWalkieMesh(wsUrl: string) {
     micMeterRef.current = null
     myIdRef.current = null
     nameRef.current = ''
+    updateMediaSession(false)
     setMe(null)
     setPeers({})
     setSpeaking(false)
     setMicOn(false)
     setTargets({ kind: 'all' })
     setServerState('offline')
-  }, [destroyPeer, send])
+  }, [destroyPeer, send, updateMediaSession])
+
+  // ---- background / locked screen: never hot-mic, reconnect on return -------
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        // the screen may lock while held — release PTT so we never leave a hot mic
+        if (speakingRef.current) void stopTalking()
+        releaseWakeLock()
+        return
+      }
+      // back in the foreground: <audio> elements may have been paused and the
+      // socket may have been dropped while the tab was frozen
+      unlockWalkieAudio()
+      void reviveMic()
+      reconnectNow()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => document.removeEventListener('visibilitychange', onVisibility)
+  }, [reconnectNow, releaseWakeLock, reviveMic, stopTalking])
 
   // ---- meters + RX stats polling ------------------------------------------
   useEffect(() => {

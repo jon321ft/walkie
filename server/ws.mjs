@@ -24,6 +24,7 @@ const MIME = {
   '.css': 'text/css',
   '.svg': 'image/svg+xml',
   '.json': 'application/json',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
   '.woff2': 'font/woff2',
   '.png': 'image/png',
   '.ico': 'image/x-icon',
@@ -67,7 +68,7 @@ const wss = new WebSocketServer({ server: httpServer, path: '/ws' })
 const clients = new Map()
 let nextId = 1
 
-const PROTOCOL_VERSION = 5 // bump when the client build changes materially
+const PROTOCOL_VERSION = 6 // bump when the client build changes materially
 
 function roster() {
   return [...clients.values()].map(({ id, name }) => ({ id, name }))
@@ -102,6 +103,18 @@ wss.on('connection', (ws) => {
       for (const [oldWs, oldMe] of clients) {
         if (oldMe.name.toLowerCase() === name.toLowerCase()) {
           clients.delete(oldWs)
+          try {
+            // tell the displaced client why, so it stops fighting for the name
+            oldWs.send(
+              JSON.stringify({
+                t: 'error',
+                code: 'taken',
+                message: 'This name signed in from another tab or device.',
+              }),
+            )
+          } catch {
+            /* gone */
+          }
           try {
             oldWs.terminate()
           } catch {

@@ -17,6 +17,22 @@ hold to talk. Audio flows peer-to-peer over WebRTC.
 No accounts, no channels to create, no database. The server only knows
 names and relays connection handshakes — **audio goes device-to-device**.
 
+Your name is remembered on the device, so the second visit is one tap
+("Continue as Marcus") — or none at all if the mic is already allowed.
+
+## On a phone (screen off / locked)
+
+The app is an installable PWA. Open the site on the phone, then
+**Add to Home screen** (Chrome: ⋮ menu · Safari: Share → Add to Home Screen)
+and launch it from the icon. That standalone window is what lets audio keep
+flowing while the screen is off — a normal background browser tab gets frozen
+by iOS/Android and goes silent.
+
+While you are transmitting, the app holds a **screen wake lock** so the
+screen will not sleep mid-sentence. If the screen does lock (or you switch
+apps), PTT is released automatically — you never leave a hot mic — and the
+mic, playback, and signaling auto-reconnect the moment you come back.
+
 ## Run
 
 ```
@@ -60,6 +76,17 @@ element **playing with advancing currentTime** (real RTP) ✓ → switch
 target mid-transmission → receiver gate mutes/unmutes instantly ✓ →
 release → clean CONNECTED ✓. Debug ring buffer: `window.__meshDebug` in
 the console.
+
+Automated, against real Chrome with a fake mic (see [e2e/](e2e)):
+
+```
+node e2e/tone-both-ways.mjs                                  # PTT both ways
+node e2e/real-mic-hold.mjs https://walkie-k0oq.onrender.com  # real microphone
+node e2e/session-and-background.mjs                          # session + screen lock
+```
+
+The last one proves a reload resumes the saved name untouched, Leave keeps it
+for next time, and a screen lock releases PTT instead of leaving a hot mic.
 
 ## Design
 

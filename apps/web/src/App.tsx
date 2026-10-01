@@ -18,6 +18,34 @@ import { useWalkieMesh, unlockWalkieAudio, walkieSelfTest, walkieMicTest, BUILD_
 const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
 
 // ---------------------------------------------------------------------------
+// Session memory — so nobody types their name again on the next visit
+// ---------------------------------------------------------------------------
+const NAME_KEY = 'walkie.name'
+const HINT_KEY = 'walkie.hint.homescreen'
+
+function readStored(key: string): string {
+  try {
+    return localStorage.getItem(key) ?? ''
+  } catch {
+    return '' // private mode / storage disabled
+  }
+}
+function writeStored(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    /* ignore */
+  }
+}
+function clearStored(key: string) {
+  try {
+    localStorage.removeItem(key)
+  } catch {
+    /* ignore */
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Design tokens — mirror of src/index.css @theme (binding design language)
 // ---------------------------------------------------------------------------
 const T = {
@@ -73,10 +101,26 @@ function GlobeIcon() {
 // ---------------------------------------------------------------------------
 // Username gate
 // ---------------------------------------------------------------------------
-function NameGate({ connecting, error, onJoin, onDismissError }: { connecting: boolean; error: string | null; onJoin: (name: string) => void; onDismissError: () => void }) {
-  const [name, setName] = useState('')
+function NameGate({
+  connecting,
+  error,
+  initialName,
+  onJoin,
+  onForget,
+  onDismissError,
+}: {
+  connecting: boolean
+  error: string | null
+  initialName: string
+  onJoin: (name: string) => void
+  onForget: () => void
+  onDismissError: () => void
+}) {
+  const [name, setName] = useState(initialName)
+  const [edited, setEdited] = useState(false)
+  const n = name.trim()
+  const resume = !edited && initialName.trim().length >= 2 && n === initialName.trim()
   const submit = () => {
-    const n = name.trim()
     if (n.length >= 2) onJoin(n)
   }
   return (
@@ -91,7 +135,10 @@ function NameGate({ connecting, error, onJoin, onDismissError }: { connecting: b
       </div>
       <input
         value={name}
-        onChange={(e) => setName(e.target.value)}
+        onChange={(e) => {
+          setName(e.target.value)
+          setEdited(true)
+        }}
         onKeyDown={(e) => e.key === 'Enter' && submit()}
         placeholder="e.g. Marcus"
         maxLength={24}
@@ -101,12 +148,25 @@ function NameGate({ connecting, error, onJoin, onDismissError }: { connecting: b
       />
       <button
         onClick={submit}
-        disabled={name.trim().length < 2 || connecting}
+        disabled={n.length < 2 || connecting}
         className="w-full rounded-full py-4 text-[15px] font-bold text-white transition-all disabled:opacity-40"
         style={{ background: T.mic, boxShadow: SHADOW.raisedSm }}
       >
-        {connecting ? 'Connecting…' : 'Start talking'}
+        {connecting ? 'Connecting…' : resume ? `Continue as ${n}` : 'Start talking'}
       </button>
+      {resume && (
+        <button
+          onClick={() => {
+            onForget()
+            setName('')
+            setEdited(true)
+          }}
+          className="text-center text-[12px] font-semibold"
+          style={{ color: T.inkSecondary }}
+        >
+          Not you? Use a different name
+        </button>
+      )}
       {error && (
         <button onClick={onDismissError} className="rounded-2xl px-4 py-3 text-left text-[12px] font-semibold" style={{ background: T.surface, color: T.mic, boxShadow: SHADOW.raisedSm }}>
           {error} <span style={{ color: T.inkSecondary }}>— tap to dismiss</span>
@@ -300,6 +360,45 @@ function ProbeButtons({ selfTest, micTest, engineState, rxRate, onSelfTest, onMi
 }
 
 // ---------------------------------------------------------------------------
+// Home-screen hint — background audio needs an installed (standalone) app
+// ---------------------------------------------------------------------------
+function isStandalone(): boolean {
+  try {
+    return (
+      window.matchMedia('(display-mode: standalone)').matches ||
+      (navigator as Navigator & { standalone?: boolean }).standalone === true
+    )
+  } catch {
+    return false
+  }
+}
+
+function HomeScreenHint() {
+  const [hidden, setHidden] = useState(() => readStored(HINT_KEY) === '1')
+  if (hidden) return null
+  const mobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+  if (!mobile || isStandalone()) return null
+  return (
+    <div
+      className="mt-3 flex items-start gap-3 rounded-2xl px-4 py-3 text-[11px] font-semibold leading-snug"
+      style={{ background: T.surface, color: T.inkSecondary, boxShadow: SHADOW.raisedSm }}
+    >
+      <span className="flex-1">Add Walkie to your home screen to keep audio alive with the screen off.</span>
+      <button
+        onClick={() => {
+          writeStored(HINT_KEY, '1')
+          setHidden(true)
+        }}
+        className="shrink-0 text-[11px] font-bold"
+        style={{ color: T.icon }}
+      >
+        Got it
+      </button>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
 export default function App() {
@@ -307,7 +406,42 @@ export default function App() {
   const [someIds, setSomeIds] = useState<Set<string>>(new Set())
   const [selfTest, setSelfTest] = useState<string | null>(null)
   const [micTest, setMicTest] = useState<string | null>(null)
+  const [savedName, setSavedName] = useState(() => readStored(NAME_KEY))
+  const autoJoinRef = useRef(false)
+  const savedNameRef = useRef(savedName)
+  savedNameRef.current = savedName
   const modeAll = w.targets.kind === 'all'
+
+  // remember the name so the next visit is one tap (or none)
+  useEffect(() => {
+    if (!w.me) return
+    writeStored(NAME_KEY, w.me.name)
+    if (savedName !== w.me.name) setSavedName(w.me.name)
+  }, [w.me, savedName])
+
+  // resume the saved session automatically when the mic is already allowed —
+  // guarded so we never surprise anyone with a permission prompt on load
+  const joinRef = useRef(w.join)
+  joinRef.current = w.join
+  useEffect(() => {
+    if (autoJoinRef.current) return
+    autoJoinRef.current = true
+    const name = savedNameRef.current.trim()
+    if (name.length < 2) return
+    void (async () => {
+      try {
+        const perm = await navigator.permissions.query({ name: 'microphone' as PermissionName })
+        if (perm.state === 'granted') void joinRef.current(name)
+      } catch {
+        /* no Permissions API (Safari) — the resume button is one tap away */
+      }
+    })()
+  }, [])
+
+  const forgetName = () => {
+    clearStored(NAME_KEY)
+    setSavedName('')
+  }
 
   const runSelfTest = async () => {
     setSelfTest('testing…')
@@ -389,6 +523,8 @@ export default function App() {
           )}
         </header>
 
+        <HomeScreenHint />
+
         {w.staleBuild && (
           <div className="mt-3 rounded-2xl px-4 py-3 text-center text-[12px] font-bold" style={{ background: '#FDECEC', color: T.mic }}>
             New version available — hard-refresh this tab (Ctrl+Shift+R) to get working audio.
@@ -396,7 +532,14 @@ export default function App() {
         )}
 
         {!w.me ? (
-          <NameGate connecting={w.connecting} error={w.error} onJoin={w.join} onDismissError={w.dismissError} />
+          <NameGate
+            connecting={w.connecting}
+            error={w.error}
+            initialName={savedName}
+            onJoin={w.join}
+            onForget={forgetName}
+            onDismissError={w.dismissError}
+          />
         ) : (
           <>
             <section className="mt-5">
