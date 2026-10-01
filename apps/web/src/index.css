@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: #F4F6FA;
+  --color-surface: #F9FAFC;
+  --color-ink: #202936;
+  --color-ink-secondary: #8B94A3;
+  --color-icon: #60758C;
+  --color-mic: #F0444D;
+  --color-active: #35A66F;
+  --color-waveform: #536B80;
+
+  --font-sans: 'Inter', system-ui, sans-serif;
+
+  --shadow-neumorphic: 6px 6px 14px rgba(32, 41, 54, 0.07), -6px -6px 14px rgba(255, 255, 255, 0.9);
+  --shadow-neumorphic-sm: 3px 3px 7px rgba(32, 41, 54, 0.06), -3px -3px 7px rgba(255, 255, 255, 0.9);
+  --shadow-neumorphic-pressed: inset 3px 3px 7px rgba(32, 41, 54, 0.08), inset -3px -3px 7px rgba(255, 255, 255, 0.9);
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-background);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Anti-slop: enforce clean aesthetic */
+* {
+  box-sizing: border-box;
+}
+
+/* Prevent accidental scroll on touch hold (PTT) */
+html, body {
+  overflow: hidden;
+}
+
+/* Smooth transitions */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "walkie",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server/ws.mjs",
+    "dev": "cd apps/web && npm run dev",
+    "build": "cd apps/web && npm run build",
+    "preview": "node server/ws.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.12.0"
+  }
+}
